@@ -1,0 +1,39 @@
+From: OmarAfet (prepared with an LLM; see README)
+Subject: [PATCH] rustc_span: do not compute line and column in `span_to_filename`
+
+`SourceMap::span_to_filename` called `lookup_char_pos`, which also computes the
+line, the column and the display column. The display column walks every char from
+the start of the line to the position (`char_width` per char). Only the file name is
+used, so this work is thrown away.
+
+`Session::resolve_path` calls `span_to_filename` for every relative
+`include_bytes!`, `include_str!` and `include!`. In generated code where a whole file
+is one long line, each call walks up to the full line, so the total cost is
+(number of calls) x (line length).
+
+Measured with nightly-2026-10-14 (822182db4) on an Apple M2:
+- test crate, 1,511 relative `include_bytes!` in one 2.4 MB line: expand_crate 8.2 s;
+  same code with one call per line, or with absolute paths: 0.04 s.
+- SteelMC `steel-registry` (17 MB generated code, 1,511 `include_bytes!`):
+  about 90% of the macro-expansion samples are in this call chain
+  (expand_include_bytes -> resolve_path -> span_to_filename ->
+  lookup_file_pos_with_col_display -> char_width).
+
+`lookup_char_pos(pos).file` is `lookup_source_file(pos)`, so the result is the same
+file name; only the unused line and column work is removed.
+
+---
+ compiler/rustc_span/src/source_map.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/compiler/rustc_span/src/source_map.rs b/compiler/rustc_span/src/source_map.rs
+--- a/compiler/rustc_span/src/source_map.rs
++++ b/compiler/rustc_span/src/source_map.rs
+@@ -518,5 +518,6 @@
+ 
+     pub fn span_to_filename(&self, sp: Span) -> FileName {
+-        self.lookup_char_pos(sp.lo()).file.name.clone()
++        // Only the file is needed: skip the line and column lookup in `lookup_char_pos`.
++        self.lookup_source_file(sp.lo()).name.clone()
+     }
+ 
